@@ -1,35 +1,29 @@
 #imports
 import matplotlib.pyplot as plt
 import scipy
-#import astropy.io
 from astropy.io import fits
-#from astropy import units as u
-#import astropy.cosmology
-##?from astropy import wcs
 import numpy as np
 from numpy import append
 import healpy as hp
-#from cosmology import *  # No star imports
 from scipy.interpolate import interp1d
 #import pixell
 from pixell import reproject, enplot, enmap, utils, curvedsky
-#import tarfile
-#import orphics
-#from orphics import catalogs
-#import camb
-#from camb import model, initialpower 
 import time
 from mpi4py import MPI
 import numpy as np
 import os,sys
 import argparse
 import putils
+from p_tqdm import p_map
+from functools import partial
+
 
 argparser = argparse.ArgumentParser()
 # Read positional argument for case
 argparser.add_argument("name", type=str, help="case number")
 # Read optional boolean argument for random
 argparser.add_argument("-r", "--random", action="store_true", help="random")
+argparser.add_argument("-w", "--websky", action="store_true", help="use websky sim map")
 argparser.add_argument("-m", "--modelsub", action="store_true", help="model subtraction")
 argparser.add_argument("-s", "--sz", action="store_true", help="SZ clusters instead of halo catalog")
 # Read optional argument for maximum number of objects
@@ -57,11 +51,23 @@ rank = comm.Get_rank()
 ntasks = comm.Get_size()
 
 
-
-
-
 ACTsim = '/data5/sims/websky/dr5_clusters/TOnly_ACTNoise_cmb-tsz_la145_CAR.fits'
-imap = enmap.read_map(ACTsim)
+ACTmap = enmap.read_map(ACTsim)
+
+# Converts alm files to an enmap
+def read_enmap_alm(file):
+    shape, wcs = enmap.fullsky_geometry(res=0.5 * utils.arcmin, proj='car')
+    iheal = hp.read_alm(file)
+    iheal = iheal.astype(np.float64)
+    return curvedsky.alm2map(iheal,enmap.empty(shape,wcs,dtype=np.float64))
+
+websky_map = read_enmap_alm('lensed_alm.fits')
+
+if args.websky:
+    imap = websky_map
+
+else:
+    imap = ACTmap
 
 if args.modelsub:
     raise NotImplementedError
@@ -69,15 +75,6 @@ if args.modelsub:
     modelmap = enmap.read_map(model)
     imap = imap - modelmap
 
-
-# Converts alm files to an enmap
-def read_enmap_alm(file):
-    shape, wcs = enmap.fullsky_geometry(res=0.5 * utils.arcmin, proj='car')
-    iheal = hp.read_alm(file)
-    iheal = iheal.astype(np.float32)
-    return curvedsky.alm2map(iheal,enmap.empty(shape,wcs,dtype=np.float32))
-
-websky_map = read_enmap_alm('lensed_alm.fits')
 
 # Loads catalog of real halo data
 def load_fits(fits_file,column_names,hdu_num=1,Nmax=None):
@@ -101,6 +98,11 @@ if random:
 
     # Generate an array of random numbers for phi
     RA = np.random.uniform(0, 360., size=(50000,)) * utils.degree
+
+    coords_list = RA, DEC
+
+    mass = 0
+    zs = 0 
 
 else:
     if not(args.sz):
@@ -152,29 +154,61 @@ else:
         RA  = hp.vec2ang(np.column_stack((x,y,z)))[0] # in radians
         DEC = hp.vec2ang(np.column_stack((x,y,z)))[1]
 
+    
+def thumbnail(enmap, imass, iz, iRA, iDEC, rescale=True):
 
-
-    
-def thumbnail(enmap, iRA, iDEC, imass, iz, rescale=True):
-    
-    coords = np.column_stack(([iDEC], [iRA]))
-    
+    coords = np.array([iDEC, iRA]).reshape(-1, 2)
+    print("coords shape:", coords.shape)
+        
     image = reproject.thumbnails(enmap, coords, r=args.rmax * utils.arcmin)
-    if image.shape[0]!=1: raise ValueError
+    if image.shape[0] != 1:
+        raise ValueError("Unexpected shape for image:", image.shape)
     image = image[0]
+    
+    # coords = np.array([iDEC, iRA])
+    
+    # print(args.rmax)
+    # print(enmap.shape)
+    # print(coords.shape)
+    # image = reproject.thumbnails(enmap, coords, r=args.rmax * utils.arcmin)
+    # if image.shape[0]!=1: raise ValueError
+    # image = image[0]
 
     if rescale and not(random):
-        mean_factor_value = mean_factor(imass, iz)
+        mean_factor_value = putils.mean_factor(imass, iz)
         wmap = image.copy()
         wmap.wcs.wcs.cdelt *= mean_factor_value
         image = wmap.project(image.shape, image.wcs)
     
     return image
 
+
+# def averaged_map(imass, iz, iRA, iDEC, rescale=True):
+#     image_list = thumbnail(imass, iz, iRA, iDEC, rescale=rescale)
+#     thumbnails = np.stack(image_list, axis=0)
+#     avg_thumbnail = np.mean(thumbnails, axis=0)
+#     return avg_thumbnail
+
+
+if not(random):
+    mass, zs, RA, DEC = putils.cluster_selection(mass, zs, RA, DEC)
+
+
+def f_thumbnail(enmap, imass, iz, iRA, iDEC):
+    return thumbnail(enmap, imass, iz, iRA, iDEC, rescale=True)
+
+all_thumbnails = np.array(p_map(partial(f_thumbnail(imap, mass, zs, RA, DEC), map)))
+
+print("done")
+
+def f_unrescaled_thumbnail(imass, iz, iRA, iDEC):
+    return thumbnail(imass, iz, iRA, iDEC, rescale=False)
+
+all_unrescaled_thumbnails = np.array(p_map(partial(f_unrescaled_thumbnail(imap, mass, zs, RA, DEC),map)))
+
 # Calculates the magnitude of the average gradient of a thumbnail
-def gradient(i, enmap, mass_list, redshift_list, RA_list, dec_list, random=False, rescale=False):
-    thumb = thumbnail(i, enmap, mass_list, redshift_list, RA_list, dec_list, random=random, rescale=rescale)
-    y_grad, x_grad = np.gradient(thumb)
+def gradient():
+    y_grad, x_grad = np.gradient(all_unrescaled_thumbnails)
 
     x_ave = np.mean(x_grad)
     y_ave = np.mean(y_grad)
@@ -184,35 +218,27 @@ def gradient(i, enmap, mass_list, redshift_list, RA_list, dec_list, random=False
 
     return mag, angle
 
-def averaged_map(n, enmap, mass_list, redshift_list, RA_list, dec_list, random = False, rescale=True):
-    image_list = [thumbnail(i, enmap, mass_list, redshift_list, RA_list, dec_list, random=random, rescale=rescale) for i in range(n)]
-    thumbnails = np.stack(image_list, axis=0)
-    avg_thumbnail = np.mean(thumbnails, axis=0)
-    return avg_thumbnail
+def f_gradient():
+    return gradient()
 
-def rotate_thumbnail(i, enmap, mass_list, redshift_list, RA_list, dec_list, random=False, rescale=True):
-    
-    thumbnail_image = thumbnail(i, enmap, mass_list, redshift_list, RA_list, dec_list, random=random, rescale=rescale)
-    
-    angle = gradient(i, enmap, mass_list, redshift_list, RA_list, dec_list, random=random, rescale=False)[1]
-    
-    rotated_thumbnail = scipy.ndimage.rotate(thumbnail_image, np.degrees(angle), reshape=False, mode='constant', cval=np.nan)
-    
+all_gradients = np.array(p_map(partial(f_gradient, map)))
+
+def rotate_thumbnail():
+    angle = all_gradients[1]
+    rotated_thumbnail = scipy.ndimage.rotate(all_thumbnails, np.degrees(angle), reshape=False, mode='constant', cval=np.nan)
     return rotated_thumbnail
 
-def averaged_map_rotated(n, enmap, mass_list, redshift_list, RA_list, dec_list, random=False, rescale=True, threshold=1000):
+def f_rotated_thumbnail():
+    return rotate_thumbnail()
+
+all_rotated_thumbnails = np.array(p_map(partial(f_rotated_thumbnail, map)))
+
+def averaged_map_rotated(threshold=1000):
     image_list_rotated = []
 
-    for i in range(n):
-        rotated_thumbnail = rotate_thumbnail(i, enmap, mass_list, redshift_list,
-                    RA_list, dec_list, random=random, rescale=rescale)
-        grad = gradient(i, enmap, mass_list, redshift_list, RA_list, dec_list, random=random, rescale=False)[0]
-
-        # Check for threshold exceeding using NumPy
-        if np.any(np.abs(rotated_thumbnail) > threshold):
-            continue
-
-        image_list_rotated.append(rotated_thumbnail)
+    # Check for threshold exceeding using NumPy
+    if np.any(np.abs(all_rotated_thumbnails) > threshold):
+        image_list_rotated.append(all_rotated_thumbnails)
 
     # Stack the images into a single NumPy array
     stacked_images_rotated = np.stack(image_list_rotated, axis=0)
@@ -220,13 +246,12 @@ def averaged_map_rotated(n, enmap, mass_list, redshift_list, RA_list, dec_list, 
     # Compute the weighted average of the stacked thumbnails
     return np.average(stacked_images_rotated, axis=0)
 
-print('testing')
+def f_averaged_rotated_thumbnail():
+    return averaged_map_rotated()
 
-if not(random):
-    mass,zs, RA, DEC = putils.cluster_selection(mass, zs, RA, DEC)
+all_averaged_rotated_thumbnails = np.array(p_map(partial(f_averaged_rotated_thumbnail, map)))
 
-stack = averaged_map_rotated(imap, mass, zs, RA, DEC)
-
-enmap.write_map(f'stack_{args.name}.fits', stack)
-plt.imshow(stack)
+enmap.write_map(f'stack_{args.name}.fits', all_averaged_rotated_thumbnails)
+plt.imshow(all_averaged_rotated_thumbnails)
+plt.colorbar()
 plt.savefig('stack.png')
