@@ -3,11 +3,10 @@ import matplotlib.pyplot as plt
 import scipy
 from astropy.io import fits
 import numpy as np
-from numpy import append
 import healpy as hp
 from scipy.interpolate import interp1d
 #import pixell
-from pixell import reproject, enplot, enmap, utils, curvedsky
+from pixell import reproject, enmap, utils, curvedsky
 import time
 from mpi4py import MPI
 import numpy as np
@@ -16,7 +15,6 @@ import argparse
 import putils
 from p_tqdm import p_map
 from functools import partial
-
 
 argparser = argparse.ArgumentParser()
 # Read positional argument for case
@@ -30,6 +28,7 @@ argparser.add_argument("-s", "--sz", action="store_true", help="SZ clusters inst
 argparser.add_argument("-N", "--N", type=int, default=None, help="number of objects to limit to")
 argparser.add_argument("--rmax", type=float, default=10., help="maximum radius in arcmin")
 argparser.add_argument("--decmin", type=float, default=-50., help="minimum dec for randoms in degrees")
+#note: dec max is set to 20 in cluster selection
 argparser.add_argument("--decmax", type=float, default=20., help="maximum dec for randoms in degrees")
 # Read optional argument for number of randoms
 argparser.add_argument("--nrand", type=int, default=50000, help="number of randoms")
@@ -50,7 +49,6 @@ comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 ntasks = comm.Get_size()
 
-
 ACTsim = '/data5/sims/websky/dr5_clusters/TOnly_ACTNoise_cmb-tsz_la145_CAR.fits'
 ACTmap = enmap.read_map(ACTsim)
 
@@ -64,17 +62,16 @@ def read_enmap_alm(file):
 websky_map = read_enmap_alm('lensed_alm.fits')
 
 if args.websky:
-    imap = websky_map
+    mymap = websky_map
 
 else:
-    imap = ACTmap
+    mymap = ACTmap
 
 if args.modelsub:
     raise NotImplementedError
     model = '/data5/sims/websky/dr5_clusters/model_MFMF_pass2_cmb-tsz_f150.fits' # is this the right path?
     modelmap = enmap.read_map(model)
     imap = imap - modelmap
-
 
 # Loads catalog of real halo data
 def load_fits(fits_file,column_names,hdu_num=1,Nmax=None):
@@ -89,30 +86,38 @@ if random:
     # Creates coordinates for random locations in the lensed CMB map
     np.random.seed(0)
 
-    lower_dec = args.decmin  # Lower bound (inclusive)
-    upper_dec = args.decmax  # Upper bound (exclusive)
+    lower_dec = np.deg2rad(args.decmin)  # Lower bound (inclusive)
+    upper_dec = np.deg2rad(args.decmax)  # Upper bound (exclusive)
 
     # Generate an array of random numbers for theta
-    cosDEC = np.random.uniform(np.cos(lower_dec), np.cos(upper_dec), size=(50000,))
-    DEC = np.arccos(cosDEC)
+    # cosDEC = np.random.uniform(np.cos(lower_dec), np.cos(upper_dec), size=(args.nrand,))
+    # DEC = np.arccos(cosDEC)
+    DEC = np.random.uniform(lower_dec, upper_dec, size=(args.nrand,))
+    #this for some reason is in radians
 
     # Generate an array of random numbers for phi
-    RA = np.random.uniform(0, 360., size=(50000,)) * utils.degree
+    RAdeg = np.random.uniform(0, 360., size=(args.nrand,))
+    # in radians
+    RA = np.deg2rad(RAdeg)
 
-    coords_list = RA, DEC
+    # coords = RA, DEC
+    coords = np.column_stack((DEC[:args.nrand], RA[:args.nrand]))
 
-    mass = 0
-    zs = 0 
+    mass = np.zeros(args.nrand)
+    zs = np.zeros(args.nrand)
 
 else:
-    if not(args.sz):
+    if (args.sz):
         SZcat = '/data5/sims/websky/dr5_clusters/ACTSim_CMB-T_cmb-tsz_MFMF_pass2_mass.fits'
         columnnames = 'M200m', 'redshift', 'RADeg', 'decDeg'
         function = load_fits(SZcat, columnnames, hdu_num=1,Nmax=None)
         mass = function['M200m'] * 1 *10**14
         zs = function['redshift']
-        RA = function['RADeg'] * utils.degree
-        DEC = function['decDeg'] * utils.degree
+        RA = np.deg2rad(function['RADeg'])
+        DEC = np.deg2rad(function['decDeg'])
+        #Note: These are originally in DEGREES. However I think the smallest degrees are listed first
+        #now i have converted to radians
+
     else:
         # variables for Halo catalog
         omegab = 0.049
@@ -151,64 +156,29 @@ else:
         chi      = np.sqrt(x**2+y**2+z**2)    # Mpc
         vrad     = (x*vx + y*vy + z*vz) / chi # km/sec
         zs = zofchi(chi)  
-        RA  = hp.vec2ang(np.column_stack((x,y,z)))[0] # in radians
+        RA = hp.vec2ang(np.column_stack((x,y,z)))[0] # in RADIANS
         DEC = hp.vec2ang(np.column_stack((x,y,z)))[1]
+    mass, zs, RA, DEC = putils.cluster_selection(mass, zs, RA, DEC)
+    coords = np.column_stack((DEC[:args.N], RA[:args.N]))
 
-    
-def thumbnail(enmap, imass, iz, iRA, iDEC, rescale=True):
-
-    coords = np.array([iDEC, iRA]).reshape(-1, 2)
-    print("coords shape:", coords.shape)
-        
-    image = reproject.thumbnails(enmap, coords, r=args.rmax * utils.arcmin)
-    if image.shape[0] != 1:
-        raise ValueError("Unexpected shape for image:", image.shape)
-    image = image[0]
-    
-    # coords = np.array([iDEC, iRA])
-    
-    # print(args.rmax)
-    # print(enmap.shape)
-    # print(coords.shape)
-    # image = reproject.thumbnails(enmap, coords, r=args.rmax * utils.arcmin)
-    # if image.shape[0]!=1: raise ValueError
-    # image = image[0]
-
-    if rescale and not(random):
-        mean_factor_value = putils.mean_factor(imass, iz)
-        wmap = image.copy()
-        wmap.wcs.wcs.cdelt *= mean_factor_value
-        image = wmap.project(image.shape, image.wcs)
-    
+def take_thumbnails(icoords):
+    image = reproject.thumbnails(mymap, icoords, r=args.rmax * utils.arcmin)
     return image
 
+all_thumbnails = p_map(partial(take_thumbnails),coords)
 
-# def averaged_map(imass, iz, iRA, iDEC, rescale=True):
-#     image_list = thumbnail(imass, iz, iRA, iDEC, rescale=rescale)
-#     thumbnails = np.stack(image_list, axis=0)
-#     avg_thumbnail = np.mean(thumbnails, axis=0)
-#     return avg_thumbnail
+def rescale_thumbnails(thumbnails, imass, iz):
+    if not random:
+        i_factor_value = putils.get_factor_i(imass, iz)
+        wmap = thumbnails.copy()
+        wmap.wcs.wcs.cdelt *= i_factor_value
+        thumbnails = wmap.project(thumbnails.shape, thumbnails.wcs)
+    return thumbnails
 
+all_rescaled_thumbnails = p_map(partial(rescale_thumbnails), all_thumbnails, mass, zs)
 
-if not(random):
-    mass, zs, RA, DEC = putils.cluster_selection(mass, zs, RA, DEC)
-
-
-def f_thumbnail(enmap, imass, iz, iRA, iDEC):
-    return thumbnail(enmap, imass, iz, iRA, iDEC, rescale=True)
-
-all_thumbnails = np.array(p_map(partial(f_thumbnail(imap, mass, zs, RA, DEC), map)))
-
-print("done")
-
-def f_unrescaled_thumbnail(imass, iz, iRA, iDEC):
-    return thumbnail(imass, iz, iRA, iDEC, rescale=False)
-
-all_unrescaled_thumbnails = np.array(p_map(partial(f_unrescaled_thumbnail(imap, mass, zs, RA, DEC),map)))
-
-# Calculates the magnitude of the average gradient of a thumbnail
-def gradient():
-    y_grad, x_grad = np.gradient(all_unrescaled_thumbnails)
+def gradient(thumbnails):
+    y_grad, x_grad = np.gradient(thumbnails)
 
     x_ave = np.mean(x_grad)
     y_ave = np.mean(y_grad)
@@ -218,40 +188,46 @@ def gradient():
 
     return mag, angle
 
-def f_gradient():
-    return gradient()
+all_gradients = p_map(partial(gradient), all_thumbnails)
 
-all_gradients = np.array(p_map(partial(f_gradient, map)))
 
-def rotate_thumbnail():
-    angle = all_gradients[1]
-    rotated_thumbnail = scipy.ndimage.rotate(all_thumbnails, np.degrees(angle), reshape=False, mode='constant', cval=np.nan)
-    return rotated_thumbnail
+def rotate_thumbnails(thumbnail_gradients, thumbnails):
+    angle = thumbnail_gradients[1]
+    rotated_thumbnails = scipy.ndimage.rotate(thumbnails, np.degrees(angle), reshape=False, mode='constant', cval=np.nan)
+    return rotated_thumbnails
 
-def f_rotated_thumbnail():
-    return rotate_thumbnail()
+all_rotated_thumbnails = p_map(partial(rotate_thumbnails), all_gradients, all_rescaled_thumbnails)
 
-all_rotated_thumbnails = np.array(p_map(partial(f_rotated_thumbnail, map)))
 
-def averaged_map_rotated(threshold=1000):
-    image_list_rotated = []
+# # def check_threshold(rotated_thumbnails, threshold=1000):
+# #     image_list_rotated = []
 
-    # Check for threshold exceeding using NumPy
-    if np.any(np.abs(all_rotated_thumbnails) > threshold):
-        image_list_rotated.append(all_rotated_thumbnails)
+# #     # Check for threshold exceeding using NumPy
+# #     if np.any(np.abs(rotated_thumbnails) > threshold):
+# #         rotated_thumbnails = np.array(rotated_thumbnails)
+# #         print(rotated_thumbnails.shape)
+# #         image_list_rotated.append(rotated_thumbnails)
 
-    # Stack the images into a single NumPy array
-    stacked_images_rotated = np.stack(image_list_rotated, axis=0)
+# #     return image_list_rotated
 
-    # Compute the weighted average of the stacked thumbnails
-    return np.average(stacked_images_rotated, axis=0)
+# # threshold_rotated_thumbnails = np.array(p_map(partial(check_threshold), all_rotated_thumbnails))
+# # print(threshold_rotated_thumbnails)
 
-def f_averaged_rotated_thumbnail():
-    return averaged_map_rotated()
+def stack_thumbnails(thumbnails):
+    return np.stack(thumbnails, axis=0)
 
-all_averaged_rotated_thumbnails = np.array(p_map(partial(f_averaged_rotated_thumbnail, map)))
+stack_of_thumbnails = p_map(partial(stack_thumbnails), all_rotated_thumbnails)
+print("Shape of one thumbnail in stack:", (np.array(stack_of_thumbnails[0])).shape)
+print("Shape of stack of thumbnails:", (np.array(stack_of_thumbnails)).shape)
 
-enmap.write_map(f'stack_{args.name}.fits', all_averaged_rotated_thumbnails)
-plt.imshow(all_averaged_rotated_thumbnails)
+def average_stack(stack):
+    return np.mean(stack, axis=0)
+
+# averaged_thumbnail = p_map(average_stack, stack_of_thumbnails)
+averaged_thumbnail = average_stack(stack_of_thumbnails)
+print("Shape of averaged thumbnail:", (np.array(averaged_thumbnail)).shape)
+
+enmap.write_map(f'stack_{args.name}.fits', averaged_thumbnail)
+plt.imshow(averaged_thumbnail)
 plt.colorbar()
-plt.savefig('stack.png')
+plt.savefig(f'{args.name}.png')
