@@ -4,68 +4,106 @@ import numpy as np
 from pixell import enmap
 import sys
 import subprocess, os
+import argparse
 my_env = os.environ.copy()
 my_env['DISABLE_MPI'] = 'true'
 
+argparser = argparse.ArgumentParser()
+
+argparser.add_argument("name", type=str, help="case number")
+
+# Read positional argument for case
+argparser.add_argument("name1", type=str, help="case number")
+# Read optional boolean argument for random
+argparser.add_argument("-r1", "--random1", action="store_true", help="random")
+argparser.add_argument("-w1", "--websky1", action="store_true", help="use websky sim map")
+argparser.add_argument("-m1", "--modelsub1", action="store_true", help="model subtraction")
+argparser.add_argument("-s1", "--sz1", action="store_true", help="SZ clusters instead of halo catalog")
+# Read optional argument for maximum number of objects
+argparser.add_argument("-N1", "--N1", type=int, default=13000, help="number of objects to limit to")
+# Read optional argument for number of randoms
+argparser.add_argument("--nrand1", type=int, default=50000, help="number of randoms")
+
+# Read positional argument for case
+argparser.add_argument("name2", type=str, help="case number")
+# Read optional boolean argument for random
+argparser.add_argument("-r2", "--random2", action="store_true", help="random")
+argparser.add_argument("-w2", "--websky2", action="store_true", help="use websky sim map")
+argparser.add_argument("-m2", "--modelsub2", action="store_true", help="model subtraction")
+argparser.add_argument("-s2", "--sz2", action="store_true", help="SZ clusters instead of halo catalog")
+# Read optional argument for maximum number of objects
+argparser.add_argument("-N2", "--N2", type=int, default=13000, help="number of objects to limit to")
+# Read optional argument for number of randoms
+argparser.add_argument("--nrand2", type=int, default=50000, help="number of randoms")
+
+args = argparser.parse_args()
+print(args)
+
+args_run1 = []
+
+if args.random1:
+    args_run1.append("-r")
+if args.websky1:
+    args_run1.append("-w")
+if args.modelsub1:
+    args_run1.append("-m")
+if args.sz1:
+    args_run1.append("-s")
+if args.N1:
+    args_run1.extend(["-N", str(args.N1)])
+if args.nrand1:
+    args_run1.extend(["--nrand", str(args.nrand1)])
+    
 print("Running first stack")
 
 # Define the arguments for the first run
-args_run1 = ["python", "PrometheusTest.py", "case0_select", "--websky"]
+run1 = ["python", "PrometheusTest.py", f'{args.name1}']
+run1.extend(args_run1)
 
-# Run the first script with the specified arguments
-result_run1 = subprocess.run(args_run1, capture_output=False, text=True, env= my_env)
-
-sys.exit()
+# # Run the first script with the specified arguments
+result_run1 = subprocess.run(run1, capture_output=False, text=True, env=my_env)
 
 print("Reading first map")
 
-map1 = "/home3/mayaws/Maya/stack_case0_select.fits"
+map1 = f'stack_{args.name1}.fits'
 result1 = enmap.read_map(map1)
 
 print("Running second stack")
 
-# Define the arguments for the second run
-args_run2 = ["python", "PrometheusTest.py", "case0_random", "-r","--websky"]
+args_run2 = []
 
-# Run the second script with the specified arguments
-result_run2 = subprocess.run(args_run2, capture_output=False, text=True)
+if args.random2:
+    args_run2.append("-r")
+if args.websky2:
+    args_run2.append("-w")
+if args.modelsub2:
+    args_run2.append("-m")
+if args.sz2:
+    args_run2.append("-s")
+if args.N2:
+    args_run2.extend(["-N", str(args.N2)])
+if args.nrand2:
+    args_run2.extend(["--nrand", str(args.nrand2)])
+
+# Define the arguments for the second run
+run2 = ["python", "PrometheusTest.py", f'{args.name2}']
+run2.extend(args_run2)
+
+result_run2 = subprocess.run(run2, capture_output=False, text=True, env=my_env)
 
 print("Reading second map")
 
-map2 = "/home3/mayaws/Maya/stack_case0_random.fits"
+map2 = f'stack_{args.name2}.fits'
 result2 = enmap.read_map(map2)
+
+print("Creating composite map")
 
 # Perform the subtraction or other desired operations on the FITS file data
 composite_data = result1 - result2
-
-# # Save the composite data to a new FITS file
-# composite_filename = "/home3/mayaws/Maya/compositetest1.fits"  # Update this with the desired output filename
-# fits.writeto(composite_filename, composite_data, overwrite=True)
 
 # Display the result if applicable
 plt.imshow(composite_data)
 plt.colorbar()
 plt.show()
-plt.savefig('case0.png')
+plt.savefig(f'{args.name}.png')
 
-
-# import subprocess
-# import matplotlib.pyplot as plt
-
-# # Define the arguments for the first run
-# args_run1 = ["python", "PrometheusTest.py", "test1", "--N 100"]
-
-# # Run the first script with the specified arguments
-
-
-# # Define the arguments for the second run
-# args_run2 = ["python", "PrometheusTest.py", "randomtest1", "-r", "--nrand 100"]
-
-# # Run the second script with the specified arguments
-
-
-# composite_thumbnail = subprocess.run(args_run1) - subprocess.run(args_run2)
-
-# plt.imshow(composite_thumbnail)
-# plt.colorbar()
-# plt.savefig('testy.png')
