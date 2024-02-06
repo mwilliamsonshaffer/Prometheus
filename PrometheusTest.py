@@ -7,10 +7,8 @@ import healpy as hp
 from scipy.interpolate import interp1d
 #import pixell
 from pixell import reproject, enmap, utils, curvedsky
-import time
-from mpi4py import MPI
+# from mpi4py import MPI
 import numpy as np
-import os,sys
 import argparse
 import putils
 from p_tqdm import p_map
@@ -25,7 +23,7 @@ argparser.add_argument("-w", "--websky", action="store_true", help="use websky s
 argparser.add_argument("-m", "--modelsub", action="store_true", help="model subtraction")
 argparser.add_argument("-s", "--sz", action="store_true", help="SZ clusters instead of halo catalog")
 # Read optional argument for maximum number of objects
-argparser.add_argument("-N", "--N", type=int, default=None, help="number of objects to limit to")
+argparser.add_argument("-N", "--N", type=int, default=13000, help="number of objects to limit to")
 argparser.add_argument("--rmax", type=float, default=10., help="maximum radius in arcmin")
 argparser.add_argument("--decmin", type=float, default=-50., help="minimum dec for randoms in degrees")
 #note: dec max is set to 20 in cluster selection
@@ -45,9 +43,9 @@ print(nrand)
 Nmax = args.N
 print(Nmax)
 
-comm = MPI.COMM_WORLD
-rank = comm.Get_rank()
-ntasks = comm.Get_size()
+# comm = MPI.COMM_WORLD
+# rank = comm.Get_rank()
+# ntasks = comm.Get_size()
 
 ACTsim = '/data5/sims/websky/dr5_clusters/TOnly_ACTNoise_cmb-tsz_la145_CAR.fits'
 ACTmap = enmap.read_map(ACTsim)
@@ -159,6 +157,7 @@ else:
         RA = hp.vec2ang(np.column_stack((x,y,z)))[0] # in RADIANS
         DEC = hp.vec2ang(np.column_stack((x,y,z)))[1]
     mass, zs, RA, DEC = putils.cluster_selection(mass, zs, RA, DEC)
+    print(len(RA))
     coords = np.column_stack((DEC[:args.N], RA[:args.N]))
 
 def take_thumbnails(icoords):
@@ -228,6 +227,4 @@ averaged_thumbnail = average_stack(stack_of_thumbnails)
 print("Shape of averaged thumbnail:", (np.array(averaged_thumbnail)).shape)
 
 enmap.write_map(f'stack_{args.name}.fits', averaged_thumbnail)
-plt.imshow(averaged_thumbnail)
-plt.colorbar()
-plt.savefig(f'{args.name}.png')
+print(f'stack_{args.name}.fits')
