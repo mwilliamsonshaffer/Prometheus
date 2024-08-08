@@ -21,7 +21,9 @@ argparser.add_argument("name", type=str, help="case number")
 # Read optional arguments
 argparser.add_argument("-x", "--unrotated", action="store_true", help="don't rotate stack")
 argparser.add_argument("-r", "--random", action="store_true", help="random")
+argparser.add_argument("-d", "--data", action="store_true", help="use real data map and catalog")
 argparser.add_argument("-w", "--websky", action="store_true", help="use websky sim map")
+argparser.add_argument("-t", "--tmap", action="store_true", help="use t sim map")
 argparser.add_argument("-q", "--qmap", action="store_true", help="use q sim map")
 argparser.add_argument("-u", "--umap", action="store_true", help="use u sim map")
 argparser.add_argument("-m", "--modelsub", action="store_true", help="model subtraction")
@@ -47,7 +49,31 @@ print(nrand)
 Nmax = args.N
 print(Nmax)
 
-if (args.websky) or (args.qmap) or (args.umap):
+if (args.data):
+    print("Reading data map")
+
+    # shape, wcs = enmap.fullsky_geometry(res=0.5 * u.arcmin, proj='car')
+    # new_shape = (3,) + shape
+    map = '/data5/act/coadds/20240323_simple/act_planck_s08_s22_f150_daynight_map.fits'
+    tqu_map = enmap.read_map(map)
+    # print(teb_alm.shape)
+    # iqu_map = curvedsky.alm2map(teb_alm,enmap.empty(new_shape,wcs,dtype=np.float64),spin=[0,2])
+    tmap = tqu_map[0]
+    qmap = tqu_map[1]
+    umap = tqu_map[2]
+
+    if (args.qmap):
+        mymap = qmap
+    elif (args.umap):
+        mymap = umap
+    elif (args.tmap): 
+        mymap = tmap 
+
+    lower_dec = np.deg2rad(-60)
+    upper_dec = np.deg2rad(20)
+    upper_ra = 2* np.pi
+
+elif (args.websky):
     print("Reading Websky map")
 
     shape, wcs = enmap.fullsky_geometry(res=0.5 * u.arcmin, proj='car')
@@ -65,7 +91,7 @@ if (args.websky) or (args.qmap) or (args.umap):
         mymap = qmap
     elif (args.umap):
         mymap = umap
-    else: 
+    elif (args.tmap): 
         mymap = tmap 
 
     lower_dec = -np.pi/2
@@ -95,20 +121,25 @@ if (args.noise):
     print("Adding noise")
     nlevel = 10.0
     fwhm = 1.5
+
+    if not (args.data):
     
-    def apply_beam(imap): 
-        # map2alm of the maps, almxfl(alm, beam_1d) to convolve with beam, alm2map to convert back to map
-        nside = 8192
-        alm_lmax = nside * 3
-        bfunc = lambda x: maps.gauss_beam(fwhm, x)  
-        imap_alm = curvedsky.map2alm(imap, lmax=alm_lmax)
-        beam_convoloved_alm = curvedsky.almxfl(imap_alm, bfunc)
-        return curvedsky.alm2map(beam_convoloved_alm, enmap.empty(imap.shape, imap.wcs))
-    if nlevel < 1e-5:
-        white_noise =0
+        def apply_beam(imap): 
+            # map2alm of the maps, almxfl(alm, beam_1d) to convolve with beam, alm2map to convert back to map
+            nside = 8192
+            alm_lmax = nside * 3
+            bfunc = lambda x: maps.gauss_beam(fwhm, x)  
+            imap_alm = curvedsky.map2alm(imap, lmax=alm_lmax)
+            beam_convoloved_alm = curvedsky.almxfl(imap_alm, bfunc)
+            return curvedsky.alm2map(beam_convoloved_alm, enmap.empty(imap.shape, imap.wcs))
+        if nlevel < 1e-5:
+            white_noise =0
+        else:
+            white_noise = maps.white_noise(mymap.shape, mymap.wcs, noise_muK_arcmin=nlevel)
+        mymap = apply_beam(mymap) + white_noise
+
     else:
-        white_noise = maps.white_noise(mymap.shape, mymap.wcs, noise_muK_arcmin=nlevel)
-    mymap = apply_beam(mymap) + white_noise
+        mymap = mymap
 
 print("Loading Catalogs")
 
@@ -136,8 +167,18 @@ if random:
     zs = np.zeros(args.nrand)
     
 else:
+    if (args.data):
+        realact_cat = '/data5/act/hiltonm/versioned/DR6_cluster-catalog_v0.2.fits'
+        columnnames = 'M200m', 'redshift', 'RADeg', 'decDeg', 'SNR'
+        function = load_fits(realact_cat, columnnames, hdu_num=1,Nmax=None)
 
-    if (args.sz):
+        mass = function['M200m'] * 1 *10**14
+        zs = function['redshift']
+        RA = np.deg2rad(function['RADeg'])
+        DEC = np.deg2rad(function['decDeg'])
+        SNR = function['SNR']
+
+    elif (args.sz):
         print("Loading SZ Catalog")
 
         SZcat = '/data5/sims/websky/nemo-sim-kit7/sim-kit_NemoWebSky_CustomLensedCMB_tenToA0Tuned_ACT-DR5-2Pass_2degTiles/NemoWebSky_CustomLensedCMB_tenToA0Tuned_ACT-DR5-2Pass_2degTiles/NemoWebSky_CustomLensedCMB_tenToA0Tuned_ACT-DR5-2Pass_2degTiles_mass.fits'
@@ -226,7 +267,6 @@ all_thumbnails = p_map(partial(take_thumbnails),coords)
 
 if (args.noise):
     print("Applying Filters")
-
     def default_theory(lpad=9000,root="cosmo2017_10K_acc3"):
         cambRoot = f"/home3/mayaws/orphics/data/{root}"
         return cosmology.loadTheorySpectraFromCAMB(cambRoot,unlensedEqualsLensed=False,useTotal=False,TCMB = 2.7255e6,lpad=lpad,get_dimensionless=False)
@@ -236,65 +276,53 @@ if (args.noise):
     cltt = theory.lCl('TT',ells)
     clee = theory.lCl('EE', ells)
 
-    if (args.qmap) or (args.umap):
-        def wiener_filter(thumbnail):
-            nell = (nlevel * np.pi / 180. / 60. / maps.gauss_beam(ells, fwhm)) ** 2
-            wiener = np.nan_to_num(clee / (clee + 2*nell/ maps.gauss_beam(ells, fwhm)**2))
-            taper, w2 = maps.get_taper(thumbnail.shape, thumbnail.wcs)
-            fthumb = enmap.fft(thumbnail * taper, normalize='phys')
-            modlmap_values = thumbnail.modlmap()
-            wiener_interp = maps.interp(ells, wiener)(modlmap_values)
-            fthumb = fthumb*wiener_interp
-            filtered_thumbnail = enmap.ifft(fthumb, normalize='phys').real
-            return filtered_thumbnail
+
+    def filter_iqu(imap,beam_fwhm=fwhm,noise_uk_arcmin=nlevel):
+        shape,wcs = imap.shape[-2:],imap.wcs
+        modlmap = enmap.modlmap(shape,wcs)
+        ps = np.zeros((3,3,shape[0],shape[1]))
+        # theory = cosmology.default_theory()
+        ps[0,0] = theory.lCl('TT',modlmap)
+        ps[1,1] = theory.lCl('EE',modlmap)
+        ps[2,2] = theory.lCl('BB',modlmap)
+        ps[0,1] = theory.lCl('TE',modlmap)
+        ps[1,0] = theory.lCl('TE',modlmap)
+        ps_tqu = maps.rotate_pol_power(shape,wcs,ps,iau=False,inverse=True)
+        taper,w2 = maps.get_taper(shape,wcs)
+        noise = (noise_uk_arcmin * np.pi / 180. / 60. / maps.gauss_beam(modlmap,beam_fwhm))**2.
+        fmap = enmap.fft(imap*taper,normalize='phys')
+        if (args.tmap):
+            wmap = fmap * ps_tqu[0,0] / (ps_tqu[0,0] + noise)
+            imap = fmap / (ps_tqu[0,0] + noise)
+        elif (args.qmap):
+            wmap = fmap * ps_tqu[1,1] / (ps_tqu[1,1] + 2.*noise)
+            imap = fmap / (ps_tqu[1,1] + 2.*noise)
+        elif (args.umap):
+            wmap = fmap * ps_tqu[2,2] / (ps_tqu[2,2] + 2.*noise)
+            imap = fmap / (ps_tqu[2,2] + 2.*noise)
+
+        wmap = enmap.ifft(enmap.enmap(wmap, wcs), normalize='phys').real
+        invvmap = enmap.ifft(enmap.enmap(imap,wcs),normalize='phys').real
+        return wmap,invvmap
+
+    all_filtered_thumbnails = np.array(p_map(partial(filter_iqu), all_thumbnails))
+    wiener_thumbnails = all_filtered_thumbnails[:,0]
+    inverse_thumbnails = all_filtered_thumbnails[:,1]
+
+    def mask_outside_circle(image, radius=10):
+        # Create a circular mask
+        center_x = image.shape[1] // 2
+        center_y = image.shape[0] // 2
+        y, x = np.ogrid[:image.shape[0], :image.shape[1]]
+        mask = ((x - center_x)**2 + (y - center_y)**2) > radius**2
         
-        def inverse_variance_filter(thumbnail):
-            nell = (nlevel * np.pi / 180. / 60. / maps.gauss_beam(ells, fwhm)) ** 2
-            inverse = np.nan_to_num(1 / (clee + 2*nell/ maps.gauss_beam(ells, fwhm)**2))
-            taper, w2 = maps.get_taper(thumbnail.shape, thumbnail.wcs)
-            fthumb = enmap.fft(thumbnail * taper, normalize='phys')
-            modlmap_values = thumbnail.modlmap()
-            wiener_interp = maps.interp(ells, inverse)(modlmap_values)
-            fthumb = fthumb * wiener_interp
-            filtered_thumbnail = enmap.ifft(fthumb, normalize='phys').real
-            return filtered_thumbnail
-            
-    else:
-        def wiener_filter(thumbnail):
-            nell = (nlevel * np.pi / 180. / 60. / maps.gauss_beam(ells, fwhm)) ** 2
-            wiener = np.nan_to_num( cltt / (cltt + nell))
-            taper, w2 = maps.get_taper(thumbnail.shape, thumbnail.wcs)
-            fthumb = enmap.fft(thumbnail * taper, normalize='phys')
-            modlmap_values = thumbnail.modlmap()
-            wiener_interp = maps.interp(ells, wiener)(modlmap_values)
-            fthumb = fthumb*wiener_interp
-            filtered_thumbnail = enmap.ifft(fthumb, normalize='phys').real
-            return filtered_thumbnail
+        # Apply the mask to the image and set values outside the circle to NaN
+        masked_image = np.copy(image)
+        masked_image[mask] = np.nan
         
-        def inverse_variance_filter(thumbnail):
-            nell = (nlevel * np.pi / 180. / 60. / maps.gauss_beam(ells, fwhm)) ** 2
-            inverse =  np.nan_to_num(1 / (cltt + nell))
-            taper, w2 = maps.get_taper(thumbnail.shape, thumbnail.wcs)
-            fthumb = enmap.fft(thumbnail * taper, normalize='phys')
-            modlmap_values = thumbnail.modlmap()
-            wiener_interp = maps.interp(ells, inverse)(modlmap_values)
-            fthumb = fthumb * wiener_interp
-            filtered_thumbnail = enmap.ifft(fthumb, normalize='phys').real
-            return filtered_thumbnail
-        
-    def taper(thumbnail):
-        taper, w2 = maps.get_taper(thumbnail.shape, thumbnail.wcs)
-        taper_thumb = thumbnail * taper
-        return taper_thumb
-        
-    def circular_mask(thumbnail, radius=5):
-        modrmap = thumbnail.modrmap()
-        thumbnail[ modrmap > radius * u.arcmin  ] = np.nan
-        return thumbnail
+        return masked_image
     
-    all_wiener_thumbnails = p_map(partial(wiener_filter), all_thumbnails)
-    all_masked_wiener_thumbnails = p_map(partial(circular_mask),all_wiener_thumbnails)
-    all_inverse_thumbnails = p_map(partial(inverse_variance_filter), all_thumbnails)
+    masked_wiener_thumbnails = np.array(p_map(partial(mask_outside_circle), wiener_thumbnails))
 
 if not (args.unrotated):
     print("Calculating gradient")
@@ -311,7 +339,7 @@ if not (args.unrotated):
         return mag, angle
 
     if (args.noise):
-        all_gradients = p_map(partial(gradient), all_masked_wiener_thumbnails)
+        all_gradients = p_map(partial(gradient), masked_wiener_thumbnails)
         all_gradients = np.array(all_gradients)
 
     else:
@@ -326,12 +354,15 @@ if not (args.unrotated):
         return rotated_thumbnails
     
     if (args.noise):
-        all_rotated_thumbnails = p_map(partial(rotate_thumbnails), all_gradients, all_inverse_thumbnails)
+        all_rotated_thumbnails = p_map(partial(rotate_thumbnails), all_gradients, inverse_thumbnails)
     else:
         all_rotated_thumbnails = p_map(partial(rotate_thumbnails), all_gradients, all_thumbnails)
 
 else:
-    all_rotated_thumbnails = all_thumbnails
+    if (args.noise):
+        all_rotated_thumbnails = inverse_thumbnails
+    else:
+        all_rotated_thumbnails = all_thumbnails
 
 print("Stacking thumbnails")
 
@@ -345,28 +376,17 @@ print((np.array(stack_of_thumbnails)).shape)
 print("Averaging stack")
 
 def average_stack(stack):
-    magnitudes = all_gradients[:, 0]
-    weighted_average = np.average(stack, axis=0, weights=magnitudes)
+    if (args.unrotated):
+        weighted_average = np.average(stack, axis=0)
+    else:
+        magnitudes = all_gradients[:, 0]
+        weighted_average = np.average(stack, axis=0, weights=magnitudes)
     return weighted_average
 
 averaged_thumbnail = average_stack(stack_of_thumbnails)
 print("Shape of averaged thumbnail:", (np.array(averaged_thumbnail)).shape)
 
-def mask_outside_circle(image, radius=20):
-    # Create a circular mask
-    center_x = image.shape[1] // 2
-    center_y = image.shape[0] // 2
-    y, x = np.ogrid[:image.shape[0], :image.shape[1]]
-    mask = ((x - center_x)**2 + (y - center_y)**2) > radius**2
-    
-    # Apply the mask to the image and set values outside the circle to NaN
-    masked_image = np.copy(image)
-    masked_image[mask] = np.nan
-    
-    return masked_image
-
-
-masked_thumbnail = mask_outside_circle(averaged_thumbnail)
+masked_thumbnail = mask_outside_circle(averaged_thumbnail, 20)
 
 print("Writing enmap")
 enmap.write_map(f'stack_{args.name}.fits', masked_thumbnail)
