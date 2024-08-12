@@ -69,6 +69,11 @@ if (args.data):
     elif (args.tmap): 
         mymap = tmap 
 
+    if (args.modelsub):
+        model = '/data5/act/hiltonm/models/nemomodel_dr6_all_clusters.fits_150.fits'
+        model_map = enmap.read_map(model)
+        mymap = mymap - model_map
+
     lower_dec = np.deg2rad(-60)
     upper_dec = np.deg2rad(20)
     upper_ra = 2* np.pi
@@ -256,7 +261,8 @@ else:
     mass, zs, RA, DEC, SNR = putils.cluster_selection(mass, zs, RA, DEC, lower_dec, upper_dec, upper_ra, SNR)
     coords = np.column_stack((DEC[:args.N], RA[:args.N]))
     # np.savetxt(f'i_factor_{args.name}.txt', i_factor)
-    
+# print(len(mass))
+# sys.exit()
 print("Taking thumbnails")
 
 def take_thumbnails(icoords):
@@ -364,6 +370,8 @@ else:
     else:
         all_rotated_thumbnails = all_thumbnails
 
+# sys.exit()
+
 print("Stacking thumbnails")
 
 def stack_thumbnails(thumbnails):
@@ -376,13 +384,21 @@ print((np.array(stack_of_thumbnails)).shape)
 print("Averaging stack")
 
 def average_stack(stack):
+    masses = mass[:args.N]
     if (args.unrotated):
-        weighted_average = np.average(stack, axis=0)
+        if (args.random): 
+            weighted_average = np.average(stack, axis=0)
+        else:
+            weighted_average = np.average(stack, axis=0, weights=masses)
     else:
         magnitudes = all_gradients[:, 0]
-        weighted_average = np.average(stack, axis=0, weights=magnitudes)
+        if (args.random):
+            weighted_average = np.average(stack, axis=0, weights=magnitudes)
+        else:
+            weight = magnitudes * masses
+            weighted_average = np.average(stack, axis=0, weights=weight)
     return weighted_average
-
+ 
 averaged_thumbnail = average_stack(stack_of_thumbnails)
 print("Shape of averaged thumbnail:", (np.array(averaged_thumbnail)).shape)
 
